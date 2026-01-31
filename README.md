@@ -90,47 +90,242 @@ Dependencias recomendadas:
 npm install pino
 npm install qrcode-terminal
 npm install express
-
 ```
+
+
+## 8️⃣ Editar archivo `package.json`
+Se debe agregar   "type": "module",
+
+```js
+{
+  "name": "whapi",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "whapi.js",
+  "scripts": {
+    "start": "node whapi.js"
+  }
+}
+```
+
+
 
 ---
 
-## 8️⃣ Crear archivo principal `app.js`
+## 8️⃣ Crear archivo principal `whapi.js`
 
 ```bash
-nano app.js
+nano whapi.js
 ```
 
 Contenido básico:
 
 ```js
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys')
-const Pino = require('pino')
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+} from "@whiskeysockets/baileys";
 
-async function start() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth')
+import P from "pino";
+import qrcode from "qrcode-terminal";
+import express from "express";
 
-    const sock = makeWASocket({
-        auth: state,
-        logger: Pino({ level: 'silent' })
-    })
+/* ================= CONFIG ================= */
+const PORT = 9000;
+const API_KEY = "a8hf4bc7j7fs3g89";
+const AUTH_DIR = "auth";
+/* ========================================= */
 
-    sock.ev.on('creds.update', saveCreds)
+let sock = null;
+let whatsappReady = false;
+let reconnecting = false;
+let keepAliveInterval = null;
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update
-        if (connection === 'close') {
-            const reason = lastDisconnect?.error?.output?.statusCode
-            console.log('Conexión cerrada. Código:', reason)
-            start()
-        }
-        if (connection === 'open') {
-            console.log('✅ WhatsApp conectado correctamente')
-        }
-    })
+/* ================= WHATSAPP ================= */
+async function startWhatsApp() {
+  if (sock) {
+    console.log("ℹ️ WhatsApp ya inicializado, no se recrea socket");
+    return;
+  }
+
+  console.log("🚀 Iniciando WhatsApp...");
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  sock = makeWASocket({
+    auth: state,
+    logger: P({ level: "silent" }),
+    markOnlineOnConnect: false,
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log("📱 Escanea QR (solo si es primera vez):");
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === "open") {
+      console.log("✅ WhatsApp conectado correctamente");
+      whatsappReady = true;
+      reconnecting = false;
+      iniciarKeepAlive();
+    }
+
+    if (connection === "close") {
+      whatsappReady = false;
+      detenerKeepAlive();
+
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      console.log("❌ Conexión cerrada. Código:", reason);
+
+      if (reason === DisconnectReason.loggedOut) {
+        console.log("🚫 Sesión cerrada definitivamente (logout)");
+        sock = null;
+        return;
+      }
+
+      if (!reconnecting) {
+        reconnecting = true;
+        console.log("🔄 Reconectando WhatsApp en 10 segundos...");
+
+        setTimeout(() => {
+          sock = null;
+          startWhatsApp();
+        }, 10000);
+      }
+    }
+  });
 }
 
-start()
+/* ================= KEEP ALIVE ================= */
+function iniciarKeepAlive() {
+  if (keepAliveInterval) return;
+
+  keepAliveInterval = setInterval(() => {
+    if (sock?.user) {
+      sock.sendPresenceUpdate("available").catch(() => {});
+    }
+  }, 60000);
+}
+
+function detenerKeepAlive() {
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+}
+
+/* ================= API HTTP ================= */
+const app = express();
+app.use(express.json());
+
+app.post("/send", async (req, res) => {
+  const { apikey, numero, grupo, mensaje, urladjunto } = req.body;
+
+  /* ===== SEGURIDAD ===== */
+  if (apikey !== API_KEY) {
+    return res.status(401).json({ ok: false, error: "API KEY inválida" });
+  }
+
+  if (!mensaje) {
+    return res.status(400).json({ ok: false, error: "mensaje obligatorio" });
+  }
+
+  if (!numero && !grupo) {
+    return res.status(400).json({
+      ok: false,
+      error: "Debe indicar numero o grupo",
+    });
+  }
+
+  if (numero && grupo) {
+    return res.status(400).json({
+      ok: false,
+      error: "Indique solo numero o grupo",
+    });
+  }
+
+  /* ===== ESTADO REAL ===== */
+  if (!whatsappReady || !sock?.user) {
+    return res.status(503).json({
+      ok: false,
+      error: "WhatsApp no conectado",
+    });
+  }
+
+  try {
+    let jid;
+    let destino;
+
+    /* ===== CONTACTO ===== */
+    if (numero) {
+      jid = numero.includes("@s.whatsapp.net")
+        ? numero
+        : `${numero.replace(/\D/g, "")}@s.whatsapp.net`;
+      destino = "contacto";
+    }
+
+    /* ===== GRUPO ===== */
+    if (grupo) {
+      destino = "grupo";
+
+      if (grupo.includes("@g.us")) {
+        jid = grupo;
+      } else {
+        const groups = await sock.groupFetchAllParticipating();
+        for (const [gid, info] of Object.entries(groups)) {
+          if (info.subject === grupo) {
+            jid = gid;
+            break;
+          }
+        }
+        if (!jid) {
+          return res
+            .status(404)
+            .json({ ok: false, error: "Grupo no encontrado" });
+        }
+      }
+    }
+
+    /* ===== ENVÍO ===== */
+    if (urladjunto) {
+      await sock.sendMessage(jid, {
+        document: { url: urladjunto },
+        mimetype: "application/pdf",
+        fileName: "archivo.pdf",
+        caption: mensaje,
+      });
+    } else {
+      await sock.sendMessage(jid, { text: mensaje });
+    }
+
+    console.log(`✅ Mensaje enviado a ${destino}: ${jid}`);
+    res.json({ ok: true, destino, jid });
+  } catch (err) {
+    console.error("❌ Error enviando mensaje:", err);
+    res.status(500).json({ ok: false, error: "Error enviando mensaje" });
+  }
+});
+
+/* ================= STATUS ================= */
+app.get("/status", (req, res) => {
+  res.json({
+    conectado: whatsappReady,
+    numero: sock?.user?.id || null,
+    reconectando: reconnecting,
+  });
+});
+
+/* ================= START ================= */
+app.listen(PORT, () => {
+  console.log(`🚀 API escuchando en http://localhost:${PORT}`);
+});
+
+startWhatsApp();
 ```
 
 Guardar y salir.
@@ -140,7 +335,7 @@ Guardar y salir.
 ## 9️⃣ Ejecutar Baileys
 
 ```bash
-node app.js
+node whapi.js
 ```
 
 📸 Escanea el **QR** desde WhatsApp:
@@ -159,7 +354,7 @@ npm install -g pm2
 Ejecutar:
 
 ```bash
-pm2 start app.js --name whatsapp-baileys
+pm2 start whapi.js --name whapi
 pm2 save
 pm2 startup
 ```
