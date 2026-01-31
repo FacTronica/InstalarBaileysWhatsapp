@@ -87,7 +87,10 @@ npm install @whiskeysockets/baileys
 Dependencias recomendadas:
 
 ```bash
-npm install pino qrcode-terminal
+npm install pino
+npm install qrcode-terminal
+npm install express
+
 ```
 
 ---
