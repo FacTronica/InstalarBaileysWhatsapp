@@ -378,6 +378,83 @@ baileys-whatsapp/
 └── package.json
 ```
 
+## Ejemplo Php para enviar Whatsapp
+
+```php
+<?php
+ini_set('display_errors', 1);
+error_reporting(E_WARNING | E_ERROR);
+date_default_timezone_set("Chile/Continental");
+
+$urlapi = "http://su_ip:9000/send";
+
+$token = "sutoken";
+
+# a quien va el mensaje
+$fono = "56912345678";
+$grupo = "";
+$mensaje = "Hola!, soy www.Whapi.cl";
+
+$urladjunto = "";
+$tipo_adjunto = ""; //"PDF";
+
+$fono_cc_1 = "";
+$fono_cc_2 = "";
+$fono_cc_3 = "";
+
+function enviarWhatsApp($urlapi, $token, $numero, $grupo, $mensaje, $urladjunto)
+{
+
+
+    $data = array(
+        "apikey"  => $token,
+        "numero"  => $numero,
+        "mensaje" => $mensaje,
+        "grupo" => $grupo,
+        "urladjunto" => $urladjunto
+    );
+
+    $payload = json_encode($data);
+
+    $ch = curl_init($urlapi);
+
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+        "Content-Type: application/json",
+        "Content-Length: " . strlen($payload)
+    ));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $response = curl_exec($ch);
+
+    if ($response === false) {
+        $error = curl_error($ch);
+        curl_close($ch);
+        return array(
+            "ok" => false,
+            "error" => $error
+        );
+    }
+
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return array(
+        "ok" => ($httpCode === 200),
+        "http_code" => $httpCode,
+        "response" => json_decode($response, true)
+    );
+}
+
+
+enviarWhatsApp($urlapi, $token, $fono,  $grupo, $mensaje, $urladjunto);
+?>
+```
+
+
 ---
 
 ## ⚠️ Recomendaciones importantes
